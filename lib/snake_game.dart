@@ -3,14 +3,31 @@ import 'dart:math';
 
 import 'package:flutter/material.dart';
 
+import 'package:flutter_animate/flutter_animate.dart';
+import 'package:google_fonts/google_fonts.dart';
+
+import 'audio_manager.dart';
+import 'leaderboard_manager.dart';
+
 class SnakeGame extends StatefulWidget {
-  const SnakeGame({super.key});
+  final String difficulty;
+
+  const SnakeGame({super.key, required this.difficulty});
 
   @override
   State<SnakeGame> createState() => _SnakeGameState();
 }
 
 enum Direction { up, down, left, right }
+enum PowerUpType { add5, add10 }
+
+class PowerUp {
+  Point<int> position;
+  PowerUpType type;
+  int lifespan;
+  int maxLifespan;
+  PowerUp(this.position, this.type, this.lifespan) : maxLifespan = lifespan;
+}
 
 class _SnakeGameState extends State<SnakeGame> with SingleTickerProviderStateMixin {
   static const int rows = 30; // 30 grid units high
@@ -19,31 +36,30 @@ class _SnakeGameState extends State<SnakeGame> with SingleTickerProviderStateMix
 
   List<Point<int>> snake = [];
   Point<int> food = const Point<int>(0, 0);
+  List<Point<int>> boobyTraps = []; // Booby traps
+  PowerUp? activePowerUp;
   Direction direction = Direction.right;
   bool isPlaying = false;
   int score = 0;
   Timer? gameTimer;
   Random random = Random();
+  int speedMs = 150; // Added speed variable
 
-  late AnimationController _wingController;
-  late Animation<double> _wingAnimation;
 
   @override
   void initState() {
     super.initState();
-    _wingController = AnimationController(
-      duration: const Duration(milliseconds: 150),
-      vsync: this,
-    )..repeat(reverse: true);
-    _wingAnimation = Tween<double>(begin: 0.2, end: 1.2).animate(
-      CurvedAnimation(parent: _wingController, curve: Curves.easeInOut),
-    );
+    _playMusic();
     _startNewGame();
+  }
+
+  Future<void> _playMusic() async {
+    await AudioManager.playBgm();
   }
 
   @override
   void dispose() {
-    _wingController.dispose();
+    AudioManager.stopBgm();
     super.dispose();
   }
 
@@ -57,13 +73,28 @@ class _SnakeGameState extends State<SnakeGame> with SingleTickerProviderStateMix
     }
     direction = Direction.right;
     score = 0;
+    activePowerUp = null;
+    boobyTraps.clear();
     _spawnFood();
   }
 
   void _startGameLoop() {
     if (isPlaying) return;
     isPlaying = true;
-    gameTimer = Timer.periodic(const Duration(milliseconds: 150), (timer) {
+    
+    speedMs = 150;
+    if (widget.difficulty == 'Easy') speedMs = 200;
+    if (widget.difficulty == 'Hard') speedMs = 100;
+
+    gameTimer = Timer.periodic(Duration(milliseconds: speedMs), (timer) {
+      if (activePowerUp != null) {
+        setState(() {
+          activePowerUp!.lifespan--;
+          if (activePowerUp!.lifespan <= 0) {
+            activePowerUp = null;
+          }
+        });
+      }
       _moveSnake();
       _checkCollision();
     });
@@ -79,9 +110,27 @@ class _SnakeGameState extends State<SnakeGame> with SingleTickerProviderStateMix
     do {
       newFood = Point<int>(random.nextInt(columns), random.nextInt(rows));
     } while (snake.contains(newFood));
-    setState(() {
       food = newFood;
-    });
+      // Spawn booby traps based on difficulty and score
+      int trapChance = score > 10 ? 20 : 5; // Spawn chance depending on score
+      if (random.nextInt(100) < trapChance) {
+        Point<int> p;
+        do {
+          p = Point<int>(random.nextInt(columns), random.nextInt(rows));
+        } while (snake.contains(p) || p == food || (activePowerUp != null && p == activePowerUp!.position) || boobyTraps.contains(p));
+        boobyTraps.add(p);
+      }
+
+      // 15% chance to spawn a powerup if none exists
+      if (activePowerUp == null && random.nextDouble() < 0.15) {
+        Point<int> p;
+        do {
+          p = Point<int>(random.nextInt(columns), random.nextInt(rows));
+        } while (snake.contains(p) || p == food || boobyTraps.contains(p));
+        // Randomly pick powerup type
+        PowerUpType type = random.nextBool() ? PowerUpType.add5 : PowerUpType.add10;
+        activePowerUp = PowerUp(p, type, 50); // Lifespan of 50 ticks
+      }
   }
 
   void _moveSnake() {
@@ -119,9 +168,24 @@ class _SnakeGameState extends State<SnakeGame> with SingleTickerProviderStateMix
 
       if (newHead == food) {
         score++;
+        AudioManager.playEatSound();
         _spawnFood();
       } else {
         snake.removeLast();
+      }
+
+      // Check powerup eating
+      if (activePowerUp != null && newHead == activePowerUp!.position) {
+        AudioManager.playPowerupSound();
+        switch (activePowerUp!.type) {
+          case PowerUpType.add5:
+            score += 5;
+            break;
+          case PowerUpType.add10:
+            score += 10;
+            break;
+        }
+        activePowerUp = null;
       }
     });
   }
@@ -131,32 +195,99 @@ class _SnakeGameState extends State<SnakeGame> with SingleTickerProviderStateMix
     // Check collision with itself
     for (int i = 1; i < snake.length; i++) {
       if (head == snake[i]) {
-        _gameOver();
+        _gameOver(false);
         return;
       }
     }
+    // Check collision with booby traps
+    if (boobyTraps.contains(head)) {
+      _gameOver(true);
+      return;
+    }
   }
 
-  void _gameOver() {
+  void _gameOver(bool causedByTrap) {
     _stopGameLoop();
+    if (causedByTrap) {
+      AudioManager.playExplosionSound();
+    } else {
+      AudioManager.playGameOverSound();
+    }
+    AudioManager.stopBgm();
+    LeaderboardManager.saveHighScore(widget.difficulty, score);
+
     showDialog(
       context: context,
       barrierDismissible: false,
       builder: (BuildContext context) {
-        return AlertDialog(
-          title: const Text('Game Over'),
-          content: Text('Your Score: $score\n\nTap to restart.'),
-          actions: [
-            TextButton(
-              onPressed: () {
-                Navigator.of(context).pop();
-                setState(() {
-                  _startNewGame();
-                });
-              },
-              child: const Text('Restart'),
+        return Dialog(
+          backgroundColor: Colors.transparent,
+          child: Container(
+            padding: const EdgeInsets.all(24),
+            decoration: BoxDecoration(
+              color: Colors.black87,
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(color: Colors.redAccent, width: 2),
+              boxShadow: const [
+                BoxShadow(
+                  color: Colors.redAccent,
+                  blurRadius: 20,
+                  spreadRadius: -5,
+                )
+              ]
             ),
-          ],
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  'GAME OVER',
+                  style: GoogleFonts.pressStart2p(
+                    color: Colors.redAccent,
+                    fontSize: 24,
+                  ),
+                ).animate().shake(duration: 400.ms),
+                const SizedBox(height: 20),
+                Text(
+                  'Difficulty: ${widget.difficulty}\nScore: $score',
+                  textAlign: TextAlign.center,
+                  style: GoogleFonts.roboto(
+                    color: Colors.white,
+                    fontSize: 18,
+                  ),
+                ),
+                const SizedBox(height: 30),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                  children: [
+                    TextButton(
+                      style: TextButton.styleFrom(
+                        foregroundColor: Colors.white70,
+                      ),
+                      onPressed: () {
+                        Navigator.of(context).pop();
+                        Navigator.of(context).pop(); // Back to Main Menu
+                      },
+                      child: const Text('MAIN MENU'),
+                    ),
+                    ElevatedButton(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.greenAccent,
+                        foregroundColor: Colors.black,
+                      ),
+                      onPressed: () {
+                        Navigator.of(context).pop();
+                        setState(() {
+                          _startNewGame();
+                          _playMusic();
+                        });
+                      },
+                      child: const Text('RESTART'),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ).animate().scale(curve: Curves.easeOutBack, duration: 500.ms),
         );
       },
     );
@@ -223,7 +354,7 @@ class _SnakeGameState extends State<SnakeGame> with SingleTickerProviderStateMix
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.deepPurple,
+      backgroundColor: Colors.black,
       body: SafeArea(
         child: Column(
           children: [
@@ -232,15 +363,51 @@ class _SnakeGameState extends State<SnakeGame> with SingleTickerProviderStateMix
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  Text(
-                    'Score: $score',
-                    style: const TextStyle(color: Colors.white, fontSize: 24),
-                  ),
-                  if (!isPlaying)
-                    const Text(
-                      'Swipe or Tap to Start',
-                      style: TextStyle(color: Colors.white70, fontSize: 18),
+                  IconButton(
+                    icon: Icon(
+                      AudioManager.isMuted ? Icons.volume_off : Icons.volume_up,
+                      color: Colors.white54,
                     ),
+                    onPressed: () async {
+                      await AudioManager.toggleMute();
+                      setState(() {});
+                    },
+                  ),
+                  Text(
+                    'SCORE: $score',
+                    style: GoogleFonts.pressStart2p(color: Colors.greenAccent, fontSize: 16),
+                  ),
+                  if (activePowerUp != null)
+                    Expanded(
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 10),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.center,
+                          children: [
+                            Text(
+                              activePowerUp!.type == PowerUpType.add10 ? '+10 POWERUP!' : '+5 POWERUP!',
+                              style: GoogleFonts.pressStart2p(
+                                color: activePowerUp!.type == PowerUpType.add10 ? Colors.purpleAccent : Colors.yellowAccent,
+                                fontSize: 8,
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            LinearProgressIndicator(
+                              value: activePowerUp!.lifespan / activePowerUp!.maxLifespan,
+                              backgroundColor: Colors.white24,
+                              valueColor: AlwaysStoppedAnimation<Color>(
+                                activePowerUp!.type == PowerUpType.add10 ? Colors.purpleAccent : Colors.yellowAccent
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  if (!isPlaying)
+                    Text(
+                      'TAP TO START',
+                      style: GoogleFonts.pressStart2p(color: Colors.amber, fontSize: 12),
+                    ).animate(onPlay: (c) => c.repeat(reverse: true)).fadeIn(duration: 800.ms),
                 ],
               ),
             ),
@@ -250,7 +417,13 @@ class _SnakeGameState extends State<SnakeGame> with SingleTickerProviderStateMix
                 onHorizontalDragUpdate: _handleSwipe,
                 onTapUp: _handleTap,
                 child: Container(
-                  color: Colors.grey[900], // game board background
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF111111),
+                    border: Border.all(color: Colors.greenAccent.withOpacity(0.5), width: 2),
+                    boxShadow: [
+                      BoxShadow(color: Colors.greenAccent.withOpacity(0.1), blurRadius: 20, spreadRadius: 5),
+                    ]
+                  ),
                   child: LayoutBuilder(
                     builder: (context, constraints) {
                       final double cellWidth = constraints.maxWidth / columns;
@@ -269,10 +442,67 @@ class _SnakeGameState extends State<SnakeGame> with SingleTickerProviderStateMix
                               margin: const EdgeInsets.all(2),
                               decoration: BoxDecoration(
                                 color: Colors.redAccent,
-                                borderRadius: BorderRadius.circular(4),
+                                borderRadius: BorderRadius.circular(8),
+                                boxShadow: const [
+                                  BoxShadow(
+                                    color: Colors.redAccent,
+                                    blurRadius: 8,
+                                    spreadRadius: 2,
+                                  )
+                                ]
                               ),
-                            ),
+                            ).animate(onPlay: (c) => c.repeat(reverse: true)).scaleXY(end: 1.1, duration: 400.ms),
                           ),
+                          // Add Powerup
+                          if (activePowerUp != null)
+                            Positioned(
+                              left: activePowerUp!.position.x * cellWidth,
+                              top: activePowerUp!.position.y * cellHeight,
+                              width: cellWidth,
+                              height: cellHeight,
+                              child: Container(
+                                margin: const EdgeInsets.all(2),
+                                decoration: BoxDecoration(
+                                  color: activePowerUp!.type == PowerUpType.add10
+                                      ? Colors.purpleAccent
+                                      : Colors.yellowAccent,
+                                  shape: BoxShape.circle,
+                                  boxShadow: [
+                                    BoxShadow(
+                                      color: activePowerUp!.type == PowerUpType.add10
+                                          ? Colors.purpleAccent
+                                          : Colors.yellowAccent,
+                                      blurRadius: 10,
+                                      spreadRadius: 2,
+                                    )
+                                  ]
+                                ),
+                              ).animate(onPlay: (c) => c.repeat(reverse: true)).scaleXY(end: 1.2, duration: 300.ms),
+                            ),
+                          // Add Booby Traps
+                          ...boobyTraps.map((trap) => Positioned(
+                            left: trap.x * cellWidth,
+                            top: trap.y * cellHeight,
+                            width: cellWidth,
+                            height: cellHeight,
+                            child: Container(
+                              margin: const EdgeInsets.all(2),
+                              decoration: BoxDecoration(
+                                color: Colors.orange,
+                                shape: BoxShape.rectangle,
+                                borderRadius: BorderRadius.circular(4),
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: Colors.orangeAccent,
+                                    blurRadius: 5,
+                                  )
+                                ],
+                              ),
+                              child: const Center(
+                                child: Text('💀', style: TextStyle(fontSize: 10)),
+                              ),
+                            ).animate(onPlay: (c) => c.repeat(reverse: true)).shake(hz: 8, curve: Curves.easeInOut),
+                          )),
                           // Add snake
                           ...snake.asMap().entries.map((entry) {
                             int index = entry.key;
@@ -281,83 +511,17 @@ class _SnakeGameState extends State<SnakeGame> with SingleTickerProviderStateMix
                               margin: const EdgeInsets.all(1),
                               decoration: BoxDecoration(
                                 color: index == 0
-                                    ? Colors.amberAccent // Gold head
-                                    : Colors.amber,      // Gold body
-                                borderRadius: BorderRadius.circular(4),
+                                        ? Colors.cyanAccent // Neon head
+                                        : Colors.cyan,      // Neon body
+                                borderRadius: BorderRadius.circular(index == 0 ? 8 : 4),
+                                boxShadow: index == 0 ? const [
+                                  BoxShadow(
+                                    color: Colors.cyanAccent,
+                                    blurRadius: 10,
+                                  )
+                                ] : null,
                               ),
                             );
-
-                            if (index == 0) {
-                              double baseRotation = 0.0;
-                              switch (direction) {
-                                case Direction.up: baseRotation = -pi / 2; break;
-                                case Direction.down: baseRotation = pi / 2; break;
-                                case Direction.left: baseRotation = pi; break;
-                                case Direction.right: baseRotation = 0.0; break;
-                              }
-
-                              segment = AnimatedBuilder(
-                                animation: _wingAnimation,
-                                builder: (context, child) {
-                                  final angle = _wingAnimation.value;
-                                  return Transform.rotate(
-                                    angle: baseRotation,
-                                    child: Stack(
-                                      alignment: Alignment.center,
-                                      clipBehavior: Clip.none,
-                                      children: [
-                                        // Left/Top wing
-                                        Positioned(
-                                          top: -cellHeight * 0.5,
-                                          child: Transform(
-                                            alignment: Alignment.bottomCenter,
-                                            transform: Matrix4.identity()..rotateX(angle),
-                                            child: Container(
-                                              width: cellWidth * 0.8,
-                                              height: cellHeight * 0.8,
-                                              decoration: BoxDecoration(
-                                                color: Colors.white.withOpacity(0.9),
-                                                borderRadius: const BorderRadius.only(
-                                                  topLeft: Radius.circular(10),
-                                                  topRight: Radius.circular(10),
-                                                ),
-                                                boxShadow: [
-                                                  BoxShadow(color: Colors.white.withOpacity(0.5), blurRadius: 4),
-                                                ]
-                                              ),
-                                            )
-                                          ),
-                                        ),
-                                        // Right/Bottom wing
-                                        Positioned(
-                                          bottom: -cellHeight * 0.5,
-                                          child: Transform(
-                                            alignment: Alignment.topCenter,
-                                            transform: Matrix4.identity()..rotateX(-angle),
-                                            child: Container(
-                                              width: cellWidth * 0.8,
-                                              height: cellHeight * 0.8,
-                                              decoration: BoxDecoration(
-                                                color: Colors.white.withOpacity(0.9),
-                                                borderRadius: const BorderRadius.only(
-                                                  bottomLeft: Radius.circular(10),
-                                                  bottomRight: Radius.circular(10),
-                                                ),
-                                                boxShadow: [
-                                                  BoxShadow(color: Colors.white.withOpacity(0.5), blurRadius: 4),
-                                                ]
-                                              ),
-                                            )
-                                          ),
-                                        ),
-                                        child!,
-                                      ],
-                                    ),
-                                  );
-                                },
-                                child: segment,
-                              );
-                            }
 
                             return Positioned(
                               left: p.x * cellWidth,
