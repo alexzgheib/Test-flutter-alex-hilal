@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
-import 'snake_game.dart';
+import 'package:google_fonts/google_fonts.dart';
+import 'main_menu.dart';
 
 void main() {
   runApp(const MyApp());
@@ -11,12 +12,20 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Awesome Snake Game (Hot Reloaded)',
+      title: 'Neon Snake',
       theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.green),
+        brightness: Brightness.dark,
+        colorScheme: const ColorScheme.dark(
+          primary: Colors.greenAccent,
+          secondary: Colors.amberAccent,
+          background: Colors.black,
+        ),
+        textTheme: GoogleFonts.robotoTextTheme(
+          Theme.of(context).textTheme.apply(bodyColor: Colors.white),
+        ),
         useMaterial3: true,
       ),
-      home: const SnakeGame(),
+      home: const MainMenu(),
       debugShowCheckedModeBanner: false,
     );
   }
